@@ -51,6 +51,8 @@ const THEMES = {
   },
 };
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5400/api/v1';
+
 const DOVE_FRAMES = [
 `
              ▄▄▄
@@ -291,24 +293,82 @@ function NowTile() {
   );
 }
 
-// TODO: impl an api to get the gh contrib graph and put it here
+const buildFallbackGithubLevels = () => {
+  const out = [];
+  for (let w = 0; w < 53; w++) {
+    for (let d = 0; d < 7; d++) {
+      const v =
+        Math.sin(w * 0.32 + d * 0.4) * 1.1 +
+        Math.cos(d * 0.5 + w * 0.08) * 0.9 +
+        Math.sin(w * 0.06) * 1.4;
+      const adj = (d === 0 || d === 6) ? v - 0.7 : v;
+      out.push(Math.max(0, Math.min(4, Math.floor((adj + 2) * 1.1))));
+    }
+  }
+  return out;
+};
+
+const formatNumber = (value) => new Intl.NumberFormat('en-US').format(value);
+
+const formatShortDate = (date) => {
+  if (!date) return '';
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return date;
+  return parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
+const toGithubGridLevels = (summary, fallbackLevels) => {
+  const days = summary?.contributionGraph;
+  if (!Array.isArray(days) || days.length === 0) return fallbackLevels;
+
+  const normalized = days
+    .map((day) => ({
+      date: day.date,
+      level: Number.isFinite(day.level) ? day.level : 0,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-365);
+
+  const padding = Array.from({ length: Math.max(0, 371 - normalized.length) }, () => 0);
+  return [...padding, ...normalized.map((day) => Math.max(0, Math.min(4, day.level)))].slice(-371);
+};
+
 function GithubTile() {
   const t = useTheme();
+  const [githubSummary, setGithubSummary] = React.useState(null);
+  const [githubError, setGithubError] = React.useState(false);
 
-  const levels = React.useMemo(() => {
-    const out = [];
-    for (let w = 0; w < 53; w++) {
-      for (let d = 0; d < 7; d++) {
-        const v =
-          Math.sin(w * 0.32 + d * 0.4) * 1.1 +
-          Math.cos(d * 0.5 + w * 0.08) * 0.9 +
-          Math.sin(w * 0.06) * 1.4;
-        const adj = (d === 0 || d === 6) ? v - 0.7 : v;
-        out.push(Math.max(0, Math.min(4, Math.floor((adj + 2) * 1.1))));
-      }
-    }
-    return out;
+  React.useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${API_BASE_URL}/github/summary`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`GitHub summary failed: ${response.status}`);
+        return response.json();
+      })
+      .then((data) => {
+        setGithubSummary(data);
+        setGithubError(false);
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setGithubError(true);
+      });
+
+    return () => controller.abort();
   }, []);
+
+  const fallbackLevels = React.useMemo(buildFallbackGithubLevels, []);
+  const levels = React.useMemo(() => {
+    return toGithubGridLevels(githubSummary, fallbackLevels);
+  }, [fallbackLevels, githubSummary]);
+
+  const dateRange = githubSummary?.startDate && githubSummary?.endDate
+    ? `${formatShortDate(githubSummary.startDate)}..${formatShortDate(githubSummary.endDate)}`
+    : 'last 365d';
+  const topLanguages = Array.isArray(githubSummary?.topLanguages)
+    ? githubSummary.topLanguages
+    : githubSummary?.topLanguage
+      ? [githubSummary.topLanguage]
+      : [];
 
   const levelColor = (lvl) => {
     if (lvl === 0) return t.bg2;
@@ -337,7 +397,7 @@ function GithubTile() {
         gap: 8, padding: '2px 4px',
       }}>
         <div style={{ color: t.fgDim }}>
-          {prompt}<span style={{ color: t.fg }}>gh contrib --year 2026</span>
+          {prompt}<span style={{ color: t.fg }}>gh contrib --range {dateRange}</span>
         </div>
 
         <div style={{
@@ -361,6 +421,11 @@ function GithubTile() {
           display: 'flex', gap: 6, fontSize: 10, color: t.fgDim,
           alignItems: 'center', justifyContent: 'flex-end',
         }}>
+          {githubSummary?.totalContributions !== undefined && (
+            <span style={{ marginRight: 'auto', color: t.fg3 }}>
+              {formatNumber(githubSummary.totalContributions)} contributions
+            </span>
+          )}
           <span>less</span>
           {[0, 1, 2, 3, 4].map((l) => (
             <div key={l} style={{
@@ -372,13 +437,34 @@ function GithubTile() {
         </div>
 
         <div style={{ color: t.fgDim, marginTop: 'auto' }}>
-          {prompt}<span style={{ color: t.fg }}>ls -S ~/.languages | head -1</span>
+          {prompt}<span style={{ color: t.fg }}>ls -laS ~/.languages | head -3</span>
         </div>
         <pre style={{
           fontFamily: 'var(--mono)', fontSize: 11, margin: 0,
           color: t.fg2, lineHeight: 1.4, whiteSpace: 'pre',
         }}>
-{`-rw-r--r--  yawnbo  `}<span style={{ color: t.accent }}>247,832</span>{`  `}<span style={{ color: t.orange }}>rust</span>{`   `}<span style={{ color: t.fgDim }}>(most used · 67% of total)</span>
+          {topLanguages.length > 0 ? (
+            <>
+              {topLanguages.slice(0, 3).map((language) => (
+                <React.Fragment key={language.name}>
+                  {`-rw-r--r--  `}
+                  <span style={{ color: t.accent }}>{formatNumber(language.estimatedLines)}</span>
+                  {`  yawnbo  `}
+                  <span style={{ color: t.orange }}>{language.name.toLowerCase()}</span>
+                  {`   `}
+                  <span style={{ color: t.fgDim }}>{language.percent}% of total</span>
+                  {`\n`}
+                </React.Fragment>
+              ))}
+            </>
+          ) : (
+            <>
+              {`-rw-r--r--  `}
+              <span style={{ color: t.accent }}>{githubError ? 'unavailable' : 'loading...'}</span>
+              {`  yawnbo  `}
+              <span style={{ color: t.orange }}>github</span>
+            </>
+          )}
         </pre>
       </div>
     </BtopBox>
